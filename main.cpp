@@ -16,12 +16,27 @@ struct FwdPkt
     libnet_tcp_hdr tcp_;
 };
 
+struct FwdPkt_ivp6
+{
+    EthHdr eth_;
+    libnet_ipv6_hdr ip_;
+    libnet_tcp_hdr tcp_;
+};
+
 struct BwdPkt
 {
     EthHdr eth_;
     libnet_ipv4_hdr ip_;
     libnet_tcp_hdr tcp_;
-    char msg[53];
+    char msg[57];
+};
+
+struct BwdPkt_ipv6
+{
+    EthHdr eth_;
+    libnet_ipv6_hdr ip_;
+    libnet_tcp_hdr tcp_;
+    char msg[57];
 };
 
 struct PsdHdr
@@ -33,9 +48,24 @@ struct PsdHdr
     u_short tcpl;
 };
 
+struct PsdHdr_ipv6
+{
+    libnet_in6_addr saddr;
+    libnet_in6_addr daddr;
+    u_char mbz;
+    u_char ptcl;
+    u_short tcpl;
+};
+
 struct FwdTcpBuf
 {
     PsdHdr psd_;
+    libnet_tcp_hdr tcp_;
+};
+
+struct FwdTcpBuf_ipv6
+{
+    PsdHdr_ipv6 psd_;
     libnet_tcp_hdr tcp_;
 };
 
@@ -43,9 +73,33 @@ struct BwdTcpBuf
 {
     PsdHdr psd_;
     libnet_tcp_hdr tcp_;
-    char msg[53];
+    char msg[57];
+};
+
+struct BwdTcpBuf_ipv6
+{
+    PsdHdr_ipv6 psd_;
+    libnet_tcp_hdr tcp_;
+    char msg[57];
 };
 #pragma pack(pop)
+
+void dump(void *p, size_t n)
+{
+    uint8_t *u8 = static_cast<uint8_t *>(p);
+    size_t i = 0;
+    while (true)
+    {
+        printf("%02X ", *u8++);
+        if (++i >= n)
+            break;
+        if (i % 8 == 0)
+            printf(" ");
+        if (i % 16 == 0)
+            printf("\n");
+    }
+    printf("\n");
+}
 
 void usage()
 {
@@ -110,6 +164,7 @@ bool isTarget(char *payload, int payload_len, char *pattern)
     {
         if (memcmp(payload + i, pattern, pattern_len) == 0)
         {
+            printf("true\n");
             return true;
         }
     }
@@ -238,9 +293,44 @@ int fwdBlock(pcap_t *handle, libnet_tcp_hdr *tcp_hdr, const u_char *packet, int 
     return 0;
 }
 
+int fwdBlock_ipv6(pcap_t *handle, libnet_tcp_hdr *tcp_hdr, const u_char *packet, int packet_size, Mac my_mac, int payload_len)
+{
+    u_char *fwd_packet_ = (u_char *)malloc(packet_size);
+    memcpy(fwd_packet_, packet, packet_size);
+    FwdPkt_ivp6 *fwd_packet = (FwdPkt_ivp6 *)fwd_packet_;
+
+    fwd_packet->eth_.smac_ = my_mac;
+
+    fwd_packet->ip_.ip_len = htons(sizeof(libnet_tcp_hdr));
+
+    fwd_packet->tcp_.th_seq = htonl(ntohl(tcp_hdr->th_seq) + payload_len);
+    fwd_packet->tcp_.th_off = sizeof(libnet_tcp_hdr) >> 2;
+    fwd_packet->tcp_.th_flags = TH_RST | TH_ACK;
+
+    fwd_packet->tcp_.th_sum = 0;
+    FwdTcpBuf_ipv6 fwd_tcp_buffer;
+    fwd_tcp_buffer.psd_.saddr = fwd_packet->ip_.ip_src;
+    fwd_tcp_buffer.psd_.daddr = fwd_packet->ip_.ip_dst;
+    fwd_tcp_buffer.psd_.mbz = 0;
+    fwd_tcp_buffer.psd_.ptcl = IPPROTO_TCP;
+    fwd_tcp_buffer.psd_.tcpl = htons(sizeof(libnet_tcp_hdr));
+    memcpy(&fwd_tcp_buffer.tcp_, &fwd_packet->tcp_, sizeof(libnet_tcp_hdr));
+    fwd_packet->tcp_.th_sum = CheckSum((u_short *)&fwd_tcp_buffer, sizeof(FwdTcpBuf_ipv6));
+
+    int res = pcap_sendpacket(handle, reinterpret_cast<const u_char *>(fwd_packet), sizeof(FwdPkt_ivp6));
+    free(fwd_packet_);
+    if (res != 0)
+    {
+        fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
+        return -1;
+    }
+
+    return 0;
+}
+
 int bwdBlock(pcap_t *handle, libnet_tcp_hdr *tcp_hdr, const u_char *packet, int packet_size, Mac my_mac, int payload_len)
 {
-    u_char *bwd_packet_ = (u_char *)malloc(packet_size + 53);
+    u_char *bwd_packet_ = (u_char *)malloc(packet_size + 57);
     memcpy(bwd_packet_, packet, packet_size);
     BwdPkt *bwd_packet = (BwdPkt *)bwd_packet_;
 
@@ -248,7 +338,7 @@ int bwdBlock(pcap_t *handle, libnet_tcp_hdr *tcp_hdr, const u_char *packet, int 
     bwd_packet->eth_.dmac_ = Mac(eth_hdr->ether_shost);
     bwd_packet->eth_.smac_ = my_mac;
 
-    bwd_packet->ip_.ip_len = htons(sizeof(libnet_ipv4_hdr) + sizeof(libnet_tcp_hdr) + 53);
+    bwd_packet->ip_.ip_len = htons(sizeof(libnet_ipv4_hdr) + sizeof(libnet_tcp_hdr) + 57);
     bwd_packet->ip_.ip_ttl = 128;
     in_addr tmp_ip = bwd_packet->ip_.ip_src;
     bwd_packet->ip_.ip_src = bwd_packet->ip_.ip_dst;
@@ -264,7 +354,7 @@ int bwdBlock(pcap_t *handle, libnet_tcp_hdr *tcp_hdr, const u_char *packet, int 
     bwd_packet->tcp_.th_off = sizeof(libnet_tcp_hdr) >> 2;
     bwd_packet->tcp_.th_flags = TH_FIN | TH_ACK;
 
-    memcpy(bwd_packet->msg, "HTTP/1.0 302 Redirect\nLocation: http://warning.or.kr\n", 53);
+    memcpy(bwd_packet->msg, "HTTP/1.0 302 Redirect\nLocation: http://warning.or.kr\n", 57);
 
     bwd_packet->tcp_.th_sum = 0;
     BwdTcpBuf bwd_tcp_buffer;
@@ -272,8 +362,8 @@ int bwdBlock(pcap_t *handle, libnet_tcp_hdr *tcp_hdr, const u_char *packet, int 
     bwd_tcp_buffer.psd_.daddr = bwd_packet->ip_.ip_dst;
     bwd_tcp_buffer.psd_.mbz = 0;
     bwd_tcp_buffer.psd_.ptcl = IPPROTO_TCP;
-    bwd_tcp_buffer.psd_.tcpl = htons(sizeof(libnet_tcp_hdr) + 53);
-    memcpy(&bwd_tcp_buffer.tcp_, &bwd_packet->tcp_, sizeof(libnet_tcp_hdr) + 53);
+    bwd_tcp_buffer.psd_.tcpl = htons(sizeof(libnet_tcp_hdr) + 57);
+    memcpy(&bwd_tcp_buffer.tcp_, &bwd_packet->tcp_, sizeof(libnet_tcp_hdr) + 57);
     bwd_packet->tcp_.th_sum = CheckSum((u_short *)&bwd_tcp_buffer, sizeof(BwdTcpBuf));
 
     int res = pcap_sendpacket(handle, reinterpret_cast<const u_char *>(bwd_packet), sizeof(BwdPkt));
@@ -287,24 +377,94 @@ int bwdBlock(pcap_t *handle, libnet_tcp_hdr *tcp_hdr, const u_char *packet, int 
     return 0;
 }
 
-int block(pcap_t *handle, const u_char *packet, Mac my_mac, int payload_len)
+int bwdBlock_ipv6(pcap_t *handle, libnet_tcp_hdr *tcp_hdr, const u_char *packet, int packet_size, Mac my_mac, int payload_len)
 {
-    struct libnet_ipv4_hdr *ip_hdr = (libnet_ipv4_hdr *)(packet + sizeof(libnet_ethernet_hdr));
-    int ip_len = ip_hdr->ip_hl << 2;
-    struct libnet_tcp_hdr *tcp_hdr = (libnet_tcp_hdr *)((char *)ip_hdr + ip_len);
+    u_char *bwd_packet_ = (u_char *)malloc(packet_size + 57);
+    memcpy(bwd_packet_, packet, packet_size);
+    BwdPkt_ipv6 *bwd_packet = (BwdPkt_ipv6 *)bwd_packet_;
 
-    int packet_size = sizeof(libnet_ethernet_hdr) + sizeof(libnet_ipv4_hdr) + sizeof(libnet_tcp_hdr); // 14 + 20 + 20 = 54
+    struct libnet_ethernet_hdr *eth_hdr = (libnet_ethernet_hdr *)(packet);
+    bwd_packet->eth_.dmac_ = Mac(eth_hdr->ether_shost);
+    bwd_packet->eth_.smac_ = my_mac;
 
-    if (fwdBlock(handle, tcp_hdr, packet, packet_size, my_mac, payload_len) == -1)
+    bwd_packet->ip_.ip_len = htons(sizeof(libnet_tcp_hdr) + 57);
+    libnet_in6_addr tmp_ip = bwd_packet->ip_.ip_src;
+    bwd_packet->ip_.ip_src = bwd_packet->ip_.ip_dst;
+    bwd_packet->ip_.ip_dst = tmp_ip;
+
+    uint16_t tmp_port = bwd_packet->tcp_.th_sport;
+    bwd_packet->tcp_.th_sport = bwd_packet->tcp_.th_dport;
+    bwd_packet->tcp_.th_dport = tmp_port;
+    bwd_packet->tcp_.th_seq = bwd_packet->tcp_.th_ack;
+    bwd_packet->tcp_.th_ack = htonl(ntohl(tcp_hdr->th_seq) + payload_len);
+    bwd_packet->tcp_.th_off = sizeof(libnet_tcp_hdr) >> 2;
+    bwd_packet->tcp_.th_flags = TH_FIN | TH_ACK;
+
+    memcpy(bwd_packet->msg, "HTTP/1.0 302 Redirect\r\nLocation: http://warning.or.kr\r\n\r\n", 57);
+
+    bwd_packet->tcp_.th_sum = 0;
+    BwdTcpBuf_ipv6 bwd_tcp_buffer;
+    bwd_tcp_buffer.psd_.saddr = bwd_packet->ip_.ip_src;
+    bwd_tcp_buffer.psd_.daddr = bwd_packet->ip_.ip_dst;
+    bwd_tcp_buffer.psd_.mbz = 0;
+    bwd_tcp_buffer.psd_.ptcl = IPPROTO_TCP;
+    bwd_tcp_buffer.psd_.tcpl = htons(sizeof(libnet_tcp_hdr) + 57);
+    memcpy(&bwd_tcp_buffer.tcp_, &bwd_packet->tcp_, sizeof(libnet_tcp_hdr) + 57);
+    bwd_packet->tcp_.th_sum = CheckSum((u_short *)&bwd_tcp_buffer, sizeof(BwdTcpBuf_ipv6));
+
+    int res = pcap_sendpacket(handle, reinterpret_cast<const u_char *>(bwd_packet), sizeof(BwdPkt_ipv6));
+    free(bwd_packet_);
+    if (res != 0)
     {
-        printf("ERR: fwdBlock()\n");
+        fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
         return -1;
     }
 
-    if (bwdBlock(handle, tcp_hdr, packet, packet_size, my_mac, payload_len) == -1)
+    return 0;
+}
+
+int block(pcap_t *handle, const u_char *packet, Mac my_mac, int payload_len)
+{
+    EthHdr *eth_hdr = (EthHdr *)packet;
+
+    if (eth_hdr->type() == ETHERTYPE_IP)
     {
-        printf("ERR: bwdBlock()\n");
-        return -1;
+        struct libnet_ipv4_hdr *ipv4_hdr = (libnet_ipv4_hdr *)(packet + sizeof(libnet_ethernet_hdr));
+        int ip_len = ipv4_hdr->ip_hl << 2;
+        struct libnet_tcp_hdr *tcp_hdr = (libnet_tcp_hdr *)((char *)ipv4_hdr + ip_len);
+
+        int packet_size = sizeof(libnet_ethernet_hdr) + sizeof(libnet_ipv4_hdr) + sizeof(libnet_tcp_hdr); // 14 + 20 + 20 = 54
+
+        if (fwdBlock(handle, tcp_hdr, packet, packet_size, my_mac, payload_len) == -1)
+        {
+            printf("ERR: fwdBlock()\n");
+            return -1;
+        }
+
+        if (bwdBlock(handle, tcp_hdr, packet, packet_size, my_mac, payload_len) == -1)
+        {
+            printf("ERR: bwdBlock()\n");
+            return -1;
+        }
+    }
+    else if (eth_hdr->type() == ETHERTYPE_IPV6)
+    {
+        struct libnet_ipv6_hdr *ipv6_hdr = (libnet_ipv6_hdr *)(packet + sizeof(libnet_ethernet_hdr));
+        struct libnet_tcp_hdr *tcp_hdr = (libnet_tcp_hdr *)((char *)ipv6_hdr + LIBNET_IPV6_H);
+
+        int packet_size = sizeof(libnet_ethernet_hdr) + sizeof(libnet_ipv6_hdr) + sizeof(libnet_tcp_hdr); // 14 + 40 + 20 = 74
+
+        if (fwdBlock_ipv6(handle, tcp_hdr, packet, packet_size, my_mac, payload_len) == -1)
+        {
+            printf("ERR: fwdBlock_ipv6()\n");
+            return -1;
+        }
+
+        if (bwdBlock_ipv6(handle, tcp_hdr, packet, packet_size, my_mac, payload_len) == -1)
+        {
+            printf("ERR: bwdBlock_ipv6()\n");
+            return -1;
+        }
     }
 
     return 0;
@@ -348,25 +508,46 @@ int main(int argc, char *argv[])
             break;
         }
 
-        struct libnet_ipv4_hdr *ip_hdr = (libnet_ipv4_hdr *)(packet + sizeof(libnet_ethernet_hdr));
-        if (ip_hdr->ip_p != IPPROTO_TCP)
+        EthHdr *eth_hdr = (EthHdr *)packet;
+        int payload_len;
+        int tcp_len;
+        struct libnet_tcp_hdr *tcp_hdr;
+
+        if (eth_hdr->type() == ETHERTYPE_IP)
         {
-            continue;
+            struct libnet_ipv4_hdr *ipv4_hdr = (libnet_ipv4_hdr *)(packet + sizeof(libnet_ethernet_hdr));
+            if (ipv4_hdr->ip_p != IPPROTO_TCP)
+                continue;
+            int ip_len = ipv4_hdr->ip_hl << 2;
+            tcp_hdr = (libnet_tcp_hdr *)((char *)ipv4_hdr + ip_len);
+
+            tcp_len = tcp_hdr->th_off << 2;
+            int tot_len = ntohs(ipv4_hdr->ip_len);
+            payload_len = tot_len - ip_len - tcp_len;
         }
 
-        int ip_len = ip_hdr->ip_hl << 2;
-        struct libnet_tcp_hdr *tcp_hdr = (libnet_tcp_hdr *)((char *)ip_hdr + ip_len);
+        else if (eth_hdr->type() == ETHERTYPE_IPV6)
+        {
+            struct libnet_ipv6_hdr *ipv6_hdr = (libnet_ipv6_hdr *)(packet + sizeof(libnet_ethernet_hdr));
+            if (ipv6_hdr->ip_nh != IPPROTO_TCP)
+                continue;
+            tcp_hdr = (libnet_tcp_hdr *)((char *)ipv6_hdr + LIBNET_IPV6_H);
 
-        int tcp_len = tcp_hdr->th_off << 2;
-        char *payload = (char *)(tcp_hdr) + tcp_len;
+            tcp_len = tcp_hdr->th_off << 2;
+            int tot_len = ntohs(ipv6_hdr->ip_len);
+            payload_len = tot_len - tcp_len;
+        }
 
-        int tot_len = ntohs(ip_hdr->ip_len);
-        int payload_len = tot_len - ip_len - tcp_len;
+        // dump((void *)packet, 64);
+        // printf("\n");
+        // continue;
+
         if (payload_len == 0)
         {
             continue;
         }
 
+        char *payload = (char *)(tcp_hdr) + tcp_len;
         char *pattern = argv[2];
         if (isTarget(payload, payload_len, pattern))
         {
