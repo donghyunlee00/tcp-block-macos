@@ -1,11 +1,9 @@
 # tcp-block
 
-Loopback에서만 테스트 해봄
+맥OS에서의 tcp client/server: https://stackoverflow.com/questions/31447099/starting-a-tcp-server-from-terminal
 
-'blocked!!!' 메시지 출력되는 것 확인 필요
+안드로이드에서의 tcp 애플리케이션: TCP/UDP TEST
 
-## gilgil's comments
-
-ip 패킷인지 확인
+## gilgil's comments (old?)
 
 boyer_moore_searcher(?) 사용
